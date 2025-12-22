@@ -3,7 +3,14 @@ name = "voxlab"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "voxlab"
+path = "src/lib.rs"
+
 [dependencies]
 kameo = "0.13"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1.0"
