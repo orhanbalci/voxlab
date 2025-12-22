@@ -78,7 +78,10 @@ impl ProcessorActor {
 impl Actor for ProcessorActor {
     type Mailbox = kameo::mailbox::unbounded::UnboundedMailbox<Self>;
 
-    async fn on_start(&mut self, _actor_ref: kameo::actor::ActorRef<Self>) -> Result<(), kameo::error::BoxError> {
+    async fn on_start(
+        &mut self,
+        _actor_ref: kameo::actor::ActorRef<Self>,
+    ) -> Result<(), kameo::error::BoxError> {
         println!("[{}] Actor started", self.behavior.name());
         Ok(())
     }
@@ -113,7 +116,10 @@ impl Message<ProcessFrame> for ProcessorActor {
 
         // Handle system frames
         match &msg.frame {
-            Frame::Start { audio_in_sample_rate, .. } => {
+            Frame::Start {
+                audio_in_sample_rate,
+                ..
+            } => {
                 self.is_running = true;
                 self.behavior.on_start(*audio_in_sample_rate).await;
             }
@@ -149,10 +155,7 @@ impl Message<LinkNext> for ProcessorActor {
     type Reply = ();
 
     async fn handle(&mut self, msg: LinkNext, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
-        println!(
-            "[{}] Linked to next processor",
-            self.behavior.name()
-        );
+        println!("[{}] Linked to next processor", self.behavior.name());
         self.next = Some(msg.next);
     }
 }
@@ -193,7 +196,7 @@ impl ProcessorBehavior for UppercaseProcessor {
                 header,
                 text: text.to_uppercase(),
             }),
-            Frame::LLMText{ header, text } => Some(Frame::LLMText {
+            Frame::LLMText { header, text } => Some(Frame::LLMText {
                 header,
                 text: text.to_uppercase(),
             }),
@@ -356,7 +359,10 @@ impl Pipeline {
     }
 
     /// Send a frame into the pipeline
-    pub async fn send(&self, frame: Frame) -> Result<(), kameo::error::SendError<ProcessFrame, kameo::error::Infallible>> {
+    pub async fn send(
+        &self,
+        frame: Frame,
+    ) -> Result<(), kameo::error::SendError<ProcessFrame, kameo::error::Infallible>> {
         if let Some(first) = self.processors.first() {
             first
                 .tell(ProcessFrame {

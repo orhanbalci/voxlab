@@ -64,12 +64,6 @@ pub enum Frame {
         header: FrameHeader,
         text: String,
     },
-    AudioInput {
-        header: FrameHeader,
-        data: Vec<u8>,
-        sample_rate: u32,
-        channels: u16,
-    },
     AudioOutput {
         header: FrameHeader,
         data: Vec<u8>,
@@ -116,6 +110,9 @@ pub enum Frame {
     BotStoppedSpeaking {
         header: FrameHeader,
     },
+    BotSpeaking {
+        header: FrameHeader,
+    },
     MixerControl {
         header: FrameHeader,
         enabled: Option<bool>,
@@ -136,6 +133,53 @@ pub enum Frame {
         header: FrameHeader,
         settings: HashMap<String, String>,
     },
+    StartInterruption {
+        header: FrameHeader,
+    },
+    StopInterruption {
+        header: FrameHeader,
+    },
+    BotInterruption {
+        header: FrameHeader,
+    },
+    EmulateUserStartedSpeaking {
+        header: FrameHeader,
+    },
+    EmulateUserStoppedSpeaking {
+        header: FrameHeader,
+    },
+    OutputTransportReady {
+        header: FrameHeader,
+    },
+    TransportMessage {
+        header: FrameHeader,
+        message: String,
+    },
+    TransportMessageUrgent {
+        header: FrameHeader,
+        message: String,
+    },
+    Stop {
+        header: FrameHeader,
+    },
+    InputAudioRaw {
+        header: FrameHeader,
+        audio: Vec<u8>,
+        sample_rate: u32,
+        num_channels: u32,
+    },
+    InputImageRaw {
+        header: FrameHeader,
+        image: Vec<u8>,
+        size: (u32, u32),
+        format: String,
+    },
+    LLMFullResponseStart {
+        header: FrameHeader,
+    },
+    LLMFullResponseEnd {
+        header: FrameHeader,
+    },
 }
 
 impl Frame {
@@ -146,7 +190,6 @@ impl Frame {
             Frame::Error { header, .. } => header.id,
             Frame::Text { header, .. } => header.id,
             Frame::LLMText { header, .. } => header.id,
-            Frame::AudioInput { header, .. } => header.id,
             Frame::AudioOutput { header, .. } => header.id,
             Frame::TTSAudio { header, .. } => header.id,
             Frame::AudioRaw { header, .. } => header.id,
@@ -157,10 +200,24 @@ impl Frame {
             Frame::UserStoppedSpeaking { header, .. } => header.id,
             Frame::BotStartedSpeaking { header } => header.id,
             Frame::BotStoppedSpeaking { header } => header.id,
+            Frame::BotSpeaking { header } => header.id,
             Frame::MixerControl { header, .. } => header.id,
             Frame::FilterControl { header, .. } => header.id,
             Frame::MixerEnable { header, .. } => header.id,
             Frame::MixerUpdateSettings { header, .. } => header.id,
+            Frame::StartInterruption { header } => header.id,
+            Frame::StopInterruption { header } => header.id,
+            Frame::BotInterruption { header } => header.id,
+            Frame::EmulateUserStartedSpeaking { header } => header.id,
+            Frame::EmulateUserStoppedSpeaking { header } => header.id,
+            Frame::OutputTransportReady { header } => header.id,
+            Frame::TransportMessage { header, .. } => header.id,
+            Frame::TransportMessageUrgent { header, .. } => header.id,
+            Frame::Stop { header } => header.id,
+            Frame::InputAudioRaw { header, .. } => header.id,
+            Frame::InputImageRaw { header, .. } => header.id,
+            Frame::LLMFullResponseStart { header } => header.id,
+            Frame::LLMFullResponseEnd { header } => header.id,
         }
     }
 
@@ -171,7 +228,6 @@ impl Frame {
             Frame::Error { .. } => "ErrorFrame",
             Frame::Text { .. } => "TextFrame",
             Frame::LLMText { .. } => "LLMTextFrame",
-            Frame::AudioInput { .. } => "AudioInputFrame",
             Frame::AudioOutput { .. } => "AudioOutputFrame",
             Frame::TTSAudio { .. } => "TTSAudioFrame",
             Frame::AudioRaw { .. } => "AudioRawFrame",
@@ -182,17 +238,46 @@ impl Frame {
             Frame::UserStoppedSpeaking { .. } => "UserStoppedSpeakingFrame",
             Frame::BotStartedSpeaking { .. } => "BotStartedSpeakingFrame",
             Frame::BotStoppedSpeaking { .. } => "BotStoppedSpeakingFrame",
+            Frame::BotSpeaking { .. } => "BotSpeakingFrame",
             Frame::MixerControl { .. } => "MixerControlFrame",
             Frame::FilterControl { .. } => "FilterControlFrame",
             Frame::MixerEnable { .. } => "MixerEnableFrame",
             Frame::MixerUpdateSettings { .. } => "MixerUpdateSettingsFrame",
+            Frame::StartInterruption { .. } => "StartInterruptionFrame",
+            Frame::StopInterruption { .. } => "StopInterruptionFrame",
+            Frame::BotInterruption { .. } => "BotInterruptionFrame",
+            Frame::EmulateUserStartedSpeaking { .. } => "EmulateUserStartedSpeakingFrame",
+            Frame::EmulateUserStoppedSpeaking { .. } => "EmulateUserStoppedSpeakingFrame",
+            Frame::OutputTransportReady { .. } => "OutputTransportReadyFrame",
+            Frame::TransportMessage { .. } => "TransportMessageFrame",
+            Frame::TransportMessageUrgent { .. } => "TransportMessageUrgentFrame",
+            Frame::Stop { .. } => "StopFrame",
+            Frame::InputAudioRaw { .. } => "InputAudioRawFrame",
+            Frame::InputImageRaw { .. } => "InputImageRawFrame",
+            Frame::LLMFullResponseStart { .. } => "LLMFullResponseStartFrame",
+            Frame::LLMFullResponseEnd { .. } => "LLMFullResponseEndFrame",
         }
     }
 
     pub fn is_system(&self) -> bool {
         matches!(
             self,
-            Frame::Start { .. } | Frame::Cancel { .. } | Frame::Error { .. }
+            Frame::Start { .. }
+                | Frame::Cancel { .. }
+                | Frame::Error { .. }
+                | Frame::EmulateUserStartedSpeaking { .. }
+                | Frame::EmulateUserStoppedSpeaking { .. }
+                | Frame::BotStartedSpeaking { .. }
+                | Frame::BotStoppedSpeaking { .. }
+                | Frame::BotSpeaking { .. }
+                | Frame::BotInterruption { .. }
+                | Frame::StartInterruption { .. }
+                | Frame::StopInterruption { .. }
+                | Frame::UserStartedSpeaking { .. }
+                | Frame::UserStoppedSpeaking { .. }
+                | Frame::OutputTransportReady { .. }
+                | Frame::TransportMessage { .. }
+                | Frame::TransportMessageUrgent { .. }
         )
     }
 
@@ -200,14 +285,13 @@ impl Frame {
         matches!(
             self,
             Frame::End { .. }
-                | Frame::UserStartedSpeaking { .. }
-                | Frame::UserStoppedSpeaking { .. }
-                | Frame::BotStartedSpeaking { .. }
-                | Frame::BotStoppedSpeaking { .. }
                 | Frame::MixerControl { .. }
                 | Frame::FilterControl { .. }
                 | Frame::MixerEnable { .. }
                 | Frame::MixerUpdateSettings { .. }
+                | Frame::Stop { .. }
+                | Frame::LLMFullResponseStart { .. }
+                | Frame::LLMFullResponseEnd { .. }
         )
     }
 
@@ -216,12 +300,13 @@ impl Frame {
             self,
             Frame::Text { .. }
                 | Frame::LLMText { .. }
-                | Frame::AudioInput { .. }
                 | Frame::AudioOutput { .. }
                 | Frame::TTSAudio { .. }
                 | Frame::AudioRaw { .. }
                 | Frame::ImageRaw { .. }
                 | Frame::Sprite { .. }
+                | Frame::InputAudioRaw { .. }
+                | Frame::InputImageRaw { .. }
         )
     }
 
