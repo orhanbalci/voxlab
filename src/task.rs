@@ -481,6 +481,7 @@ mod tests {
             |ctx| async move {
                 println!("Task {} running", ctx.name);
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = ctx.actor_ref.tell(TaskMsg::Shutdown).await;
             },
             None,
         )
@@ -497,6 +498,10 @@ mod tests {
             .await;
         let result = rx.await.unwrap();
         assert!(result.is_ok());
+
+        // Ensure all actors are stopped after test
+        let _ = manager.tell(TaskManagerMsg::Shutdown).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     #[tokio::test]
@@ -517,6 +522,7 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     ctx.reset_watchdog().await;
                 }
+                let _ = ctx.actor_ref.tell(TaskMsg::Shutdown).await;
             },
             None,
         )
@@ -533,6 +539,10 @@ mod tests {
             .await;
         let result = rx.await.unwrap();
         assert!(result.is_ok());
+
+        // Ensure all actors are stopped after test
+        let _ = manager.tell(TaskManagerMsg::Shutdown).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     #[tokio::test]

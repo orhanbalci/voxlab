@@ -43,10 +43,16 @@ pub trait ProcessorBehavior: Send + 'static {
 
 /// Generic processor actor that wraps any ProcessorBehavior
 pub struct ProcessorActor {
-    pub behavior: Box<dyn ProcessorBehavior>,
-    pub next: Option<kameo::actor::ActorRef<ProcessorActor>>,
-    pub frames_processed: u64,
-    pub is_running: bool,
+    behavior: Box<dyn ProcessorBehavior>,
+    next: Option<kameo::actor::ActorRef<ProcessorActor>>,
+    previous: Option<kameo::actor::ActorRef<ProcessorActor>>,
+    frames_processed: u64,
+    is_running: bool,
+    cancelling: bool,
+    allow_interruptions: bool,
+    enable_metrics: bool,
+    enable_usage_metrics: bool,
+    report_only_initial_ttfb: bool,
 }
 
 impl ProcessorActor {
@@ -54,9 +60,50 @@ impl ProcessorActor {
         Self {
             behavior: Box::new(behavior),
             next: None,
+            previous: None,
             frames_processed: 0,
             is_running: false,
+            cancelling: false,
+            allow_interruptions: false,
+            enable_metrics: false,
+            enable_usage_metrics: false,
+            report_only_initial_ttfb: false,
         }
+    }
+
+    /// Returns true if the processor is started (running)
+    pub fn is_started(&self) -> bool {
+        self.is_running
+    }
+
+    /// Returns true if the processor is in cancelling state
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
+    }
+
+    pub fn behavior(&self) -> &dyn ProcessorBehavior {
+        &*self.behavior
+    }
+    pub fn next(&self) -> Option<&kameo::actor::ActorRef<ProcessorActor>> {
+        self.next.as_ref()
+    }
+    pub fn previous(&self) -> Option<&kameo::actor::ActorRef<ProcessorActor>> {
+        self.previous.as_ref()
+    }
+    pub fn frames_processed(&self) -> u64 {
+        self.frames_processed
+    }
+    pub fn allow_interruptions(&self) -> bool {
+        self.allow_interruptions
+    }
+    pub fn enable_metrics(&self) -> bool {
+        self.enable_metrics
+    }
+    pub fn enable_usage_metrics(&self) -> bool {
+        self.enable_usage_metrics
+    }
+    pub fn report_only_initial_ttfb(&self) -> bool {
+        self.report_only_initial_ttfb
     }
 }
 
@@ -106,13 +153,16 @@ impl Message<ProcessFrame> for ProcessorActor {
                 ..
             } => {
                 self.is_running = true;
+                self.cancelling = false;
                 self.behavior.on_start(*audio_in_sample_rate).await;
             }
             Frame::End { .. } => {
                 self.is_running = false;
+                self.cancelling = false;
                 self.behavior.on_stop().await;
             }
             Frame::Cancel { .. } => {
+                self.cancelling = true;
                 self.is_running = false;
             }
             _ => {}
