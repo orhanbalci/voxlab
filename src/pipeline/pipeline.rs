@@ -17,9 +17,13 @@ pub enum PipelineError {
 
 pub struct Pipeline {
     name: String,
-    processors: Vec<ActorRef<ProcessorActor>>,
-    source: Option<ActorRef<PipelineSourceActor>>,
-    sink: Option<ActorRef<PipelineSinkActor>>,
+    /// All processors including source and sink: [source] + processors + [sink]
+    /// This matches pipecat's _processors list structure
+    processors: Vec<PipelineActorRef>,
+    /// Direct reference to source for convenience
+    source: ActorRef<PipelineSourceActor>,
+    /// Direct reference to sink for convenience
+    sink: ActorRef<PipelineSinkActor>,
 }
 
 impl Pipeline {
@@ -33,7 +37,7 @@ impl Pipeline {
 
         // Create default source if not provided
         let source_ref = if let Some(s) = source {
-            Some(s)
+            s
         } else {
             let source_logic = PipelineSource::new(
                 format!("{}::Source", pipeline_name),
@@ -43,12 +47,12 @@ impl Pipeline {
             );
             let state = PipelineSourceState::new(source_logic);
             let (actor_ref, _) = Actor::spawn(None, PipelineSourceActor, state).await?;
-            Some(actor_ref)
+            actor_ref
         };
 
         // Create default sink if not provided
         let sink_ref = if let Some(s) = sink {
-            Some(s)
+            s
         } else {
             let sink_logic = PipelineSink::new(
                 format!("{}::Sink", pipeline_name),
@@ -58,12 +62,21 @@ impl Pipeline {
             );
             let state = PipelineSinkState::new(sink_logic);
             let (actor_ref, _) = Actor::spawn(None, PipelineSinkActor, state).await?;
-            Some(actor_ref)
+            actor_ref
         };
+
+        // Build unified processors list: [source] + processors + [sink]
+        // This matches pipecat's self._processors = [self._source] + processors + [self._sink]
+        let mut all_processors = Vec::new();
+        all_processors.push(PipelineActorRef::new(source_ref.clone()));
+        for proc in processors {
+            all_processors.push(PipelineActorRef::new(proc));
+        }
+        all_processors.push(PipelineActorRef::new(sink_ref.clone()));
 
         Ok(Self {
             name: pipeline_name,
-            processors,
+            processors: all_processors,
             source: source_ref,
             sink: sink_ref,
         })
@@ -73,85 +86,54 @@ impl Pipeline {
         &self.name
     }
 
-    pub fn get_source_ref(&self) -> Option<&ActorRef<PipelineSourceActor>> {
-        self.source.as_ref()
-    }
-
-    pub fn get_sink_ref(&self) -> Option<&ActorRef<PipelineSinkActor>> {
-        self.sink.as_ref()
-    }
-
-    pub fn get_processors(&self) -> &[ActorRef<ProcessorActor>] {
+    /// Get all processors including source and sink
+    pub fn get_processors(&self) -> &[PipelineActorRef] {
         &self.processors
+    }
+
+    /// Get direct reference to the source actor
+    pub fn source(&self) -> &ActorRef<PipelineSourceActor> {
+        &self.source
+    }
+
+    /// Get direct reference to the sink actor
+    pub fn sink(&self) -> &ActorRef<PipelineSinkActor> {
+        &self.sink
     }
 
     /// Link all processors in sequence. Each processor will forward frames to the next.
     /// Similar to pipecat's _link_processors method.
+    /// Since processors list includes [source] + processors + [sink], this links everything.
     pub fn link_processors(&self) -> Result<(), PipelineError> {
-        if self.processors.is_empty() {
+        if self.processors.len() < 2 {
             return Ok(());
         }
 
+        debug!("Linking {} processors in sequence", self.processors.len());
+
         // Link processors in sequence: processor[0] -> processor[1] -> ... -> processor[n]
+        // This now includes: source -> processor1 -> ... -> processorN -> sink
         for i in 0..self.processors.len() - 1 {
             let current = &self.processors[i];
             let next = &self.processors[i + 1];
 
             // Send LinkNext message to link current processor to the next one
             current
-                .cast(crate::processor::ProcessorMsg::LinkNext {
-                    next: PipelineActorRef::new(next.clone()),
-                })
+                .cast(crate::processor::ProcessorMsg::LinkNext { next: next.clone() })
                 .map_err(|e| PipelineError::Other(format!("Failed to link processors: {}", e)))?;
         }
 
+        debug!("All processors linked successfully");
         Ok(())
     }
 
-    /// Link the source to the first processor (if both exist)
-    pub fn link_source_to_first_processor(&self) -> Result<(), PipelineError> {
-        if let (Some(source), Some(first_processor)) =
-            (self.source.as_ref(), self.processors.first())
-        {
-            source
-                .cast(crate::processor::ProcessorMsg::LinkNext {
-                    next: PipelineActorRef::new(first_processor.clone()),
-                })
-                .map_err(|e| {
-                    PipelineError::Other(format!("Failed to link source to first processor: {}", e))
-                })?;
-            debug!("Source linked to first processor");
-        }
-        Ok(())
-    }
-
-    /// Link the last processor to the sink (if both exist)
-    pub fn link_last_processor_to_sink(&self) -> Result<(), PipelineError> {
-        if let (Some(last_processor), Some(sink)) = (self.processors.last(), self.sink.as_ref()) {
-            sink.cast(crate::processor::ProcessorMsg::LinkPrevious {
-                previous: PipelineActorRef::new(last_processor.clone()),
-            })
-            .map_err(|e| {
-                PipelineError::Other(format!("Failed to link last processor to sink: {}", e))
-            })?;
-            debug!("Last processor linked to sink");
-        }
-        Ok(())
-    }
-
-    /// Link all components: source -> processors -> sink
-    /// This is the main method that sets up the entire pipeline chain
-    pub fn link_all(&self) -> Result<(), PipelineError> {
-        self.link_processors()?;
-        self.link_source_to_first_processor()?;
-        self.link_last_processor_to_sink()?;
-        Ok(())
-    }
-
-    /// Set up all processors in the pipeline
+    /// Set up all processors in the pipeline (including source and sink)
     /// Similar to pipecat's _setup_processors method
     pub fn setup_processors(&self, setup: ProcessorSetup) -> Result<(), PipelineError> {
-        debug!("Setting up {} processors", self.processors.len());
+        debug!(
+            "Setting up {} processors (including source and sink)",
+            self.processors.len()
+        );
 
         for processor in &self.processors {
             processor
@@ -165,10 +147,13 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Clean up all processors in the pipeline
+    /// Clean up all processors in the pipeline (including source and sink)
     /// Similar to pipecat's _cleanup_processors method
     pub fn cleanup_processors(&self) -> Result<(), PipelineError> {
-        debug!("Cleaning up {} processors", self.processors.len());
+        debug!(
+            "Cleaning up {} processors (including source and sink)",
+            self.processors.len()
+        );
 
         for processor in &self.processors {
             processor

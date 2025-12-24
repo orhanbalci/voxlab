@@ -147,6 +147,14 @@ impl Actor for PipelineSinkActor {
                 println!("[{}] Linking to previous processor", state.behaviour.name());
                 state.previous = Some(previous);
             }
+            ProcessorMsg::Setup { setup } => {
+                println!("[{}] Setting up sink", state.behaviour.name());
+                state.behaviour.setup(&setup).await;
+            }
+            ProcessorMsg::Cleanup => {
+                println!("[{}] Cleaning up sink", state.behaviour.name());
+                state.behaviour.cleanup().await;
+            }
             // Ignore other processor messages that don't apply to sink
             _ => {}
         }

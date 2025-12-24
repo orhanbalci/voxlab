@@ -150,6 +150,14 @@ impl Actor for PipelineSourceActor {
                 println!("[{}] Linking to next processor", state.behaviour.name());
                 state.next = Some(next);
             }
+            ProcessorMsg::Setup { setup } => {
+                println!("[{}] Setting up source", state.behaviour.name());
+                state.behaviour.setup(&setup).await;
+            }
+            ProcessorMsg::Cleanup => {
+                println!("[{}] Cleaning up source", state.behaviour.name());
+                state.behaviour.cleanup().await;
+            }
             // Ignore other processor messages that don't apply to source
             _ => {}
         }
