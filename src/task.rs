@@ -1,10 +1,8 @@
-use kameo::actor::{ActorRef, WeakActorRef};
-use kameo::message::{Context, Message};
-use kameo::{error::BoxError, Actor};
+use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -31,74 +29,99 @@ pub struct WatchdogConfig {
     pub timeout: Option<Duration>,
 }
 
-pub struct TaskActor {
+pub struct TaskActor;
+
+pub struct TaskState {
     id: Uuid,
     name: String,
     _created_at: Instant,
     watchdog: Option<ActorRef<WatchdogActor>>,
+    completion_notify: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
-impl TaskActor {
+impl TaskState {
     pub fn new(id: Uuid, name: String, watchdog: Option<ActorRef<WatchdogActor>>) -> Self {
         Self {
             id,
             name,
             _created_at: Instant::now(),
             watchdog,
+            completion_notify: None,
         }
     }
+
+    pub fn with_completion_notify(mut self, sender: tokio::sync::broadcast::Sender<()>) -> Self {
+        self.completion_notify = Some(sender);
+        self
+    }
 }
 
+#[async_trait::async_trait]
 impl Actor for TaskActor {
-    type Mailbox = kameo::mailbox::unbounded::UnboundedMailbox<Self>;
+    type Msg = TaskMsg;
+    type State = TaskState;
+    type Arguments = TaskState;
 
-    async fn on_start(&mut self, _actor_ref: ActorRef<Self>) -> Result<(), BoxError> {
-        info!("Task '{}' ({}) started", self.name, self.id);
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        info!("Task '{}' ({}) started", args.name, args.id);
+        Ok(args)
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("Task '{}' ({}) stopped", state.name, state.id);
+        // Notify any waiters that the task has completed
+        if let Some(notify) = &state.completion_notify {
+            let _ = notify.send(());
+        }
         Ok(())
     }
 
-    async fn on_stop(
-        &mut self,
-        _actor_ref: WeakActorRef<Self>,
-        _reason: kameo::error::ActorStopReason,
-    ) -> Result<(), BoxError> {
-        info!("Task '{}' ({}) stopped", self.name, self.id);
+    async fn handle(
+        &self,
+        myself: ActorRef<Self>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            TaskMsg::ResetWatchdog => {
+                if let Some(watchdog) = &state.watchdog {
+                    let _ = watchdog.cast(WatchdogMsg::Reset);
+                }
+            }
+            TaskMsg::GetContext(reply) => {
+                let context = TaskContext {
+                    id: state.id,
+                    name: state.name.clone(),
+                    actor_ref: myself.clone(),
+                };
+                let _ = reply.send(context);
+            }
+            TaskMsg::Shutdown => {
+                myself.stop(None);
+            }
+        }
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub enum TaskMsg {
     ResetWatchdog,
     GetContext(tokio::sync::oneshot::Sender<TaskContext>),
     Shutdown,
 }
 
-impl Message<TaskMsg> for TaskActor {
-    type Reply = ();
+pub struct WatchdogActor;
 
-    async fn handle(&mut self, msg: TaskMsg, ctx: Context<'_, Self, ()>) -> Self::Reply {
-        match msg {
-            TaskMsg::ResetWatchdog => {
-                if let Some(watchdog) = &self.watchdog {
-                    let _ = watchdog.tell(WatchdogMsg::Reset).await;
-                }
-            }
-            TaskMsg::GetContext(reply) => {
-                let context = TaskContext {
-                    id: self.id,
-                    name: self.name.clone(),
-                    actor_ref: ctx.actor_ref().clone(),
-                };
-                let _ = reply.send(context);
-            }
-            TaskMsg::Shutdown => {
-                let _ = ctx.actor_ref().stop_gracefully().await;
-            }
-        }
-    }
-}
-
-pub struct WatchdogActor {
+pub struct WatchdogState {
     task_id: Uuid,
     task_name: String,
     timeout: Duration,
@@ -106,7 +129,7 @@ pub struct WatchdogActor {
     last_reset: Instant,
 }
 
-impl WatchdogActor {
+impl WatchdogState {
     pub fn new(task_id: Uuid, task_name: String, timeout: Duration, enable_logging: bool) -> Self {
         Self {
             task_id,
@@ -118,12 +141,19 @@ impl WatchdogActor {
     }
 }
 
+#[async_trait::async_trait]
 impl Actor for WatchdogActor {
-    type Mailbox = kameo::mailbox::unbounded::UnboundedMailbox<Self>;
+    type Msg = WatchdogMsg;
+    type State = WatchdogState;
+    type Arguments = WatchdogState;
 
-    async fn on_start(&mut self, actor_ref: ActorRef<Self>) -> Result<(), BoxError> {
-        let weak_ref = actor_ref.downgrade();
-        let check_interval = self.timeout / 2;
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let check_interval = args.timeout / 2;
+        let myself_clone = myself.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = interval(check_interval);
@@ -131,88 +161,243 @@ impl Actor for WatchdogActor {
             loop {
                 interval_timer.tick().await;
 
-                if let Some(actor_ref) = weak_ref.upgrade() {
-                    let _ = actor_ref.tell(WatchdogMsg::Check).await;
-                } else {
+                // Send check message to self
+                if myself_clone.cast(WatchdogMsg::Check).is_err() {
                     break;
                 }
             }
         });
 
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            WatchdogMsg::Reset => {
+                let elapsed = state.last_reset.elapsed();
+                if state.enable_logging {
+                    debug!(
+                        "Watchdog reset for task '{}' ({}): {:?} since last reset",
+                        state.task_name, state.task_id, elapsed
+                    );
+                }
+                state.last_reset = Instant::now();
+            }
+            WatchdogMsg::Check => {
+                let elapsed = state.last_reset.elapsed();
+                if elapsed >= state.timeout {
+                    warn!(
+                        "Watchdog timeout for task '{}' ({}): no heartbeat for {:?}",
+                        state.task_name, state.task_id, elapsed
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub enum WatchdogMsg {
     Reset,
     Check,
 }
 
-impl Message<WatchdogMsg> for WatchdogActor {
-    type Reply = ();
+pub struct TaskManagerActor;
 
-    async fn handle(&mut self, msg: WatchdogMsg, _ctx: Context<'_, Self, ()>) -> Self::Reply {
-        match msg {
-            WatchdogMsg::Reset => {
-                let elapsed = self.last_reset.elapsed();
-                if self.enable_logging {
-                    debug!(
-                        "Watchdog reset for task '{}' ({}): {:?} since last reset",
-                        self.task_name, self.task_id, elapsed
-                    );
-                }
-                self.last_reset = Instant::now();
-            }
-            WatchdogMsg::Check => {
-                let elapsed = self.last_reset.elapsed();
-                if elapsed >= self.timeout {
-                    warn!(
-                        "Watchdog timeout for task '{}' ({}): no heartbeat for {:?}",
-                        self.task_name, self.task_id, elapsed
-                    );
-                }
-            }
-        }
-    }
-}
-
-pub struct TaskManagerActor {
+pub struct TaskManagerState {
     config: TaskManagerConfig,
     tasks: HashMap<Uuid, ActorRef<TaskActor>>,
     watchdogs: HashMap<Uuid, ActorRef<WatchdogActor>>,
+    completion_channels: HashMap<Uuid, tokio::sync::broadcast::Sender<()>>,
 }
 
-impl TaskManagerActor {
+impl TaskManagerState {
     pub fn new(config: TaskManagerConfig) -> Self {
         Self {
             config,
             tasks: HashMap::new(),
             watchdogs: HashMap::new(),
+            completion_channels: HashMap::new(),
         }
     }
 }
 
+#[async_trait::async_trait]
 impl Actor for TaskManagerActor {
-    type Mailbox = kameo::mailbox::unbounded::UnboundedMailbox<Self>;
+    type Msg = TaskManagerMsg;
+    type State = TaskManagerState;
+    type Arguments = TaskManagerState;
 
-    async fn on_stop(
-        &mut self,
-        _actor_ref: WeakActorRef<Self>,
-        _reason: kameo::error::ActorStopReason,
-    ) -> Result<(), BoxError> {
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         info!("Task manager shutting down");
         // Stop all tasks
-        for task in self.tasks.values() {
-            let _ = task.stop_gracefully().await;
+        for task in state.tasks.values() {
+            task.stop(None);
         }
         // Stop all watchdogs
-        for watchdog in self.watchdogs.values() {
-            let _ = watchdog.stop_gracefully().await;
+        for watchdog in state.watchdogs.values() {
+            watchdog.stop(None);
+        }
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            TaskManagerMsg::CreateTask {
+                name,
+                watchdog_config,
+                reply,
+            } => {
+                let task_id = Uuid::new_v4();
+
+                // Setup watchdog if enabled
+                let watchdog = if watchdog_config
+                    .as_ref()
+                    .map(|c| c.enable_timers)
+                    .unwrap_or(state.config.enable_watchdog_timers)
+                {
+                    let timeout = watchdog_config
+                        .as_ref()
+                        .and_then(|c| c.timeout)
+                        .unwrap_or(state.config.default_watchdog_timeout);
+
+                    let enable_logging = watchdog_config
+                        .as_ref()
+                        .map(|c| c.enable_logging)
+                        .unwrap_or(state.config.enable_watchdog_logging);
+
+                    let watchdog_state =
+                        WatchdogState::new(task_id, name.clone(), timeout, enable_logging);
+
+                    let (watchdog_ref, _) = Actor::spawn(None, WatchdogActor, watchdog_state)
+                        .await
+                        .map_err(|_| ActorProcessingErr::from("Failed to spawn watchdog"))?;
+                    state.watchdogs.insert(task_id, watchdog_ref.clone());
+                    Some(watchdog_ref)
+                } else {
+                    None
+                };
+
+                // Create completion channel for this task
+                let (completion_tx, _) = tokio::sync::broadcast::channel(1);
+
+                // Create task actor
+                let task_state = TaskState::new(task_id, name.clone(), watchdog)
+                    .with_completion_notify(completion_tx.clone());
+
+                let (task_ref, _) = Actor::spawn(None, TaskActor, task_state)
+                    .await
+                    .map_err(|_| ActorProcessingErr::from("Failed to spawn task"))?;
+                state.tasks.insert(task_id, task_ref.clone());
+                state.completion_channels.insert(task_id, completion_tx);
+
+                let handle = TaskHandle {
+                    id: task_id,
+                    name: name.clone(),
+                    actor_ref: task_ref,
+                };
+
+                let _ = reply.send(Ok(handle));
+            }
+            TaskManagerMsg::WaitForTask {
+                task_id,
+                timeout_duration,
+                reply,
+            } => {
+                if let Some(completion_tx) = state.completion_channels.get(&task_id) {
+                    let mut completion_rx = completion_tx.subscribe();
+
+                    tokio::spawn(async move {
+                        let result = if let Some(timeout_dur) = timeout_duration {
+                            match tokio::time::timeout(timeout_dur, completion_rx.recv()).await {
+                                Ok(Ok(_)) => Ok(()),
+                                Ok(Err(_)) => Ok(()), // Channel closed, task completed
+                                Err(_) => Err(TaskError::Timeout),
+                            }
+                        } else {
+                            // Wait indefinitely
+                            match completion_rx.recv().await {
+                                Ok(_) | Err(_) => Ok(()), // Either received signal or channel closed
+                            }
+                        };
+                        let _ = reply.send(result);
+                    });
+                } else {
+                    let _ = reply.send(Err(TaskError::NotFound));
+                }
+            }
+            TaskManagerMsg::CancelTask {
+                task_id,
+                timeout_duration: _,
+                reply,
+            } => {
+                if let Some(task_ref) = state.tasks.remove(&task_id) {
+                    task_ref.stop(None);
+
+                    // Remove watchdog
+                    if let Some(watchdog) = state.watchdogs.remove(&task_id) {
+                        watchdog.stop(None);
+                    }
+
+                    // Remove completion channel
+                    state.completion_channels.remove(&task_id);
+
+                    let _ = reply.send(Ok(()));
+                } else {
+                    let _ = reply.send(Err(TaskError::NotFound));
+                }
+            }
+            TaskManagerMsg::CurrentTasks { reply } => {
+                let mut tasks_info = Vec::new();
+
+                for (id, task_ref) in &state.tasks {
+                    // Get task info
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = task_ref.cast(TaskMsg::GetContext(tx));
+                    if let Ok(context) = rx.await {
+                        tasks_info.push(TaskInfo {
+                            id: context.id,
+                            name: context.name,
+                            created_at: Instant::now(), // Note: would need to store this
+                            watchdog_enabled: state.watchdogs.contains_key(id),
+                        });
+                    }
+                }
+
+                let _ = reply.send(tasks_info);
+            }
+            TaskManagerMsg::Shutdown => {
+                myself.stop(None);
+            }
         }
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub enum TaskManagerMsg {
     CreateTask {
         name: String,
@@ -235,146 +420,7 @@ pub enum TaskManagerMsg {
     Shutdown,
 }
 
-impl Message<TaskManagerMsg> for TaskManagerActor {
-    type Reply = ();
-
-    async fn handle(&mut self, msg: TaskManagerMsg, ctx: Context<'_, Self, ()>) -> Self::Reply {
-        match msg {
-            TaskManagerMsg::CreateTask {
-                name,
-                watchdog_config,
-                reply,
-            } => {
-                let task_id = Uuid::new_v4();
-
-                // Setup watchdog if enabled
-                let watchdog = if watchdog_config
-                    .as_ref()
-                    .map(|c| c.enable_timers)
-                    .unwrap_or(self.config.enable_watchdog_timers)
-                {
-                    let timeout = watchdog_config
-                        .as_ref()
-                        .and_then(|c| c.timeout)
-                        .unwrap_or(self.config.default_watchdog_timeout);
-
-                    let enable_logging = watchdog_config
-                        .as_ref()
-                        .map(|c| c.enable_logging)
-                        .unwrap_or(self.config.enable_watchdog_logging);
-
-                    let watchdog_actor =
-                        WatchdogActor::new(task_id, name.clone(), timeout, enable_logging);
-
-                    let watchdog_ref = kameo::spawn(watchdog_actor);
-                    self.watchdogs.insert(task_id, watchdog_ref.clone());
-                    Some(watchdog_ref)
-                } else {
-                    None
-                };
-
-                // Create task actor
-                let task_actor = TaskActor::new(task_id, name.clone(), watchdog);
-
-                let task_ref = kameo::spawn(task_actor);
-                self.tasks.insert(task_id, task_ref.clone());
-
-                let handle = TaskHandle {
-                    id: task_id,
-                    name: name.clone(),
-                    actor_ref: task_ref,
-                };
-
-                let _ = reply.send(Ok(handle));
-            }
-            TaskManagerMsg::WaitForTask {
-                task_id,
-                timeout_duration,
-                reply,
-            } => {
-                if let Some(task_ref) = self.tasks.get(&task_id) {
-                    let task_ref = task_ref.clone();
-
-                    tokio::spawn(async move {
-                        let result = if let Some(timeout_dur) = timeout_duration {
-                            match tokio::time::timeout(timeout_dur, task_ref.wait_for_stop()).await
-                            {
-                                Ok(_) => Ok(()),
-                                Err(_) => Err(TaskError::Timeout),
-                            }
-                        } else {
-                            task_ref.wait_for_stop().await;
-                            Ok(())
-                        };
-                        let _ = reply.send(result);
-                    });
-                } else {
-                    let _ = reply.send(Err(TaskError::NotFound));
-                }
-            }
-            TaskManagerMsg::CancelTask {
-                task_id,
-                timeout_duration,
-                reply,
-            } => {
-                if let Some(task_ref) = self.tasks.remove(&task_id) {
-                    let _ = task_ref.stop_gracefully().await;
-
-                    if let Some(timeout_dur) = timeout_duration {
-                        tokio::spawn(async move {
-                            match tokio::time::timeout(timeout_dur, task_ref.wait_for_stop()).await
-                            {
-                                Ok(_) => {
-                                    let _ = reply.send(Ok(()));
-                                }
-                                Err(_) => {
-                                    warn!("Task {} did not cancel within timeout", task_id);
-                                    let _ = reply.send(Ok(()));
-                                }
-                            }
-                        });
-                    } else {
-                        tokio::spawn(async move {
-                            task_ref.wait_for_stop().await;
-                            let _ = reply.send(Ok(()));
-                        });
-                    }
-
-                    // Remove watchdog
-                    if let Some(watchdog) = self.watchdogs.remove(&task_id) {
-                        let _ = watchdog.stop_gracefully().await;
-                    }
-                } else {
-                    let _ = reply.send(Err(TaskError::NotFound));
-                }
-            }
-            TaskManagerMsg::CurrentTasks { reply } => {
-                let mut tasks_info = Vec::new();
-
-                for (id, task_ref) in &self.tasks {
-                    // Get task info
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = task_ref.tell(TaskMsg::GetContext(tx)).await;
-                    if let Ok(context) = rx.await {
-                        tasks_info.push(TaskInfo {
-                            id: context.id,
-                            name: context.name,
-                            created_at: Instant::now(), // Note: would need to store this
-                            watchdog_enabled: self.watchdogs.contains_key(id),
-                        });
-                    }
-                }
-
-                let _ = reply.send(tasks_info);
-            }
-            TaskManagerMsg::Shutdown => {
-                let _ = ctx.actor_ref().stop_gracefully().await;
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TaskContext {
     pub id: Uuid,
     pub name: String,
@@ -382,8 +428,8 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    pub async fn reset_watchdog(&self) {
-        let _ = self.actor_ref.tell(TaskMsg::ResetWatchdog).await;
+    pub fn reset_watchdog(&self) {
+        let _ = self.actor_ref.cast(TaskMsg::ResetWatchdog);
     }
 
     pub fn watchdog_enabled(&self) -> bool {
@@ -391,7 +437,7 @@ impl TaskContext {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TaskHandle {
     pub id: Uuid,
     pub name: String,
@@ -426,9 +472,10 @@ pub enum TaskError {
 
 pub async fn create_task_manager(
     config: TaskManagerConfig,
-) -> Result<ActorRef<TaskManagerActor>, BoxError> {
-    let manager = TaskManagerActor::new(config);
-    Ok(kameo::spawn(manager))
+) -> Result<ActorRef<TaskManagerActor>, SpawnErr> {
+    let state = TaskManagerState::new(config);
+    let (actor_ref, _) = Actor::spawn(None, TaskManagerActor, state).await?;
+    Ok(actor_ref)
 }
 
 pub async fn create_task<F, Fut>(
@@ -442,19 +489,17 @@ where
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let _ = manager
-        .tell(TaskManagerMsg::CreateTask {
-            name,
-            watchdog_config,
-            reply: tx,
-        })
-        .await;
+    let _ = manager.cast(TaskManagerMsg::CreateTask {
+        name,
+        watchdog_config,
+        reply: tx,
+    });
     let handle = rx
         .await
         .map_err(|e| TaskError::ActorError(e.to_string()))??;
 
     let (ctx_tx, ctx_rx) = tokio::sync::oneshot::channel();
-    let _ = handle.actor_ref.tell(TaskMsg::GetContext(ctx_tx)).await;
+    let _ = handle.actor_ref.cast(TaskMsg::GetContext(ctx_tx));
     let context = ctx_rx
         .await
         .map_err(|e| TaskError::ActorError(e.to_string()))?;
@@ -481,7 +526,7 @@ mod tests {
             |ctx| async move {
                 println!("Task {} running", ctx.name);
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let _ = ctx.actor_ref.tell(TaskMsg::Shutdown).await;
+                let _ = ctx.actor_ref.cast(TaskMsg::Shutdown);
             },
             None,
         )
@@ -489,18 +534,16 @@ mod tests {
         .unwrap();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = manager
-            .tell(TaskManagerMsg::WaitForTask {
-                task_id: handle.id,
-                timeout_duration: None,
-                reply: tx,
-            })
-            .await;
+        let _ = manager.cast(TaskManagerMsg::WaitForTask {
+            task_id: handle.id,
+            timeout_duration: None,
+            reply: tx,
+        });
         let result = rx.await.unwrap();
         assert!(result.is_ok());
 
         // Ensure all actors are stopped after test
-        let _ = manager.tell(TaskManagerMsg::Shutdown).await;
+        let _ = manager.cast(TaskManagerMsg::Shutdown);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -520,9 +563,9 @@ mod tests {
                 for i in 0..5 {
                     println!("Working on iteration {}", i);
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    ctx.reset_watchdog().await;
+                    ctx.reset_watchdog();
                 }
-                let _ = ctx.actor_ref.tell(TaskMsg::Shutdown).await;
+                let _ = ctx.actor_ref.cast(TaskMsg::Shutdown);
             },
             None,
         )
@@ -530,18 +573,16 @@ mod tests {
         .unwrap();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = manager
-            .tell(TaskManagerMsg::WaitForTask {
-                task_id: handle.id,
-                timeout_duration: Some(Duration::from_secs(5)),
-                reply: tx,
-            })
-            .await;
+        let _ = manager.cast(TaskManagerMsg::WaitForTask {
+            task_id: handle.id,
+            timeout_duration: Some(Duration::from_secs(5)),
+            reply: tx,
+        });
         let result = rx.await.unwrap();
         assert!(result.is_ok());
 
         // Ensure all actors are stopped after test
-        let _ = manager.tell(TaskManagerMsg::Shutdown).await;
+        let _ = manager.cast(TaskManagerMsg::Shutdown);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -564,13 +605,11 @@ mod tests {
         // Cancel after a short delay
         tokio::time::sleep(Duration::from_millis(100)).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = manager
-            .tell(TaskManagerMsg::CancelTask {
-                task_id: handle.id,
-                timeout_duration: Some(Duration::from_secs(1)),
-                reply: tx,
-            })
-            .await;
+        let _ = manager.cast(TaskManagerMsg::CancelTask {
+            task_id: handle.id,
+            timeout_duration: Some(Duration::from_secs(1)),
+            reply: tx,
+        });
         let result = rx.await.unwrap();
         assert!(result.is_ok());
     }
