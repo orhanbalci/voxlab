@@ -133,10 +133,7 @@ impl Actor for PipelineSinkActor {
                     FrameDirection::Upstream => {
                         // Pull frame from previous processor
                         if let Some(ref prev) = state.previous {
-                            let _ = prev.cast(ProcessorMsg::ProcessFrame {
-                                frame,
-                                direction,
-                            });
+                            let _ = prev.cast(ProcessorMsg::ProcessFrame { frame, direction });
                         } else {
                             println!(
                                 "[{}] No previous actor to pull frame from",

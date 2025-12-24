@@ -70,12 +70,42 @@ pub struct ProcessorStatus {
     pub is_running: bool,
 }
 
+/// Configuration for setting up processors
+#[derive(Debug, Clone)]
+pub struct ProcessorSetup {
+    pub audio_in_sample_rate: u32,
+    pub audio_out_sample_rate: u32,
+    pub allow_interruptions: bool,
+    pub enable_metrics: bool,
+}
+
+impl Default for ProcessorSetup {
+    fn default() -> Self {
+        Self {
+            audio_in_sample_rate: 16000,
+            audio_out_sample_rate: 16000,
+            allow_interruptions: true,
+            enable_metrics: false,
+        }
+    }
+}
+
 /// Trait for processor behavior - implement this for custom processors
 #[async_trait::async_trait]
 pub trait ProcessorBehavior: Send + Sync + 'static {
     fn name(&self) -> &str;
     async fn process(&mut self, frame: Frame) -> Option<Frame>;
+
+    /// Called when the processor is being set up (before pipeline starts)
+    async fn setup(&mut self, _setup: &ProcessorSetup) {}
+
+    /// Called when the processor is being torn down (after pipeline stops)
+    async fn cleanup(&mut self) {}
+
+    /// Called when the pipeline starts processing
     async fn on_start(&mut self, _sample_rate: u32) {}
+
+    /// Called when the pipeline stops processing
     async fn on_stop(&mut self) {}
 }
 
@@ -173,6 +203,14 @@ impl Actor for ProcessorActor {
                 // Standard processors don't use previous links, only sinks do
                 // This is a no-op for regular processors
             }
+            ProcessorMsg::Setup { setup } => {
+                println!("[{}] Setting up processor", state.behavior.name());
+                state.behavior.setup(&setup).await;
+            }
+            ProcessorMsg::Cleanup => {
+                println!("[{}] Cleaning up processor", state.behavior.name());
+                state.behavior.cleanup().await;
+            }
             ProcessorMsg::GetStatus { reply } => {
                 let status = ProcessorStatus {
                     name: state.behavior.name().to_string(),
@@ -198,6 +236,10 @@ pub enum ProcessorMsg {
     LinkPrevious {
         previous: PipelineActorRef,
     },
+    Setup {
+        setup: ProcessorSetup,
+    },
+    Cleanup,
     GetStatus {
         reply: RpcReplyPort<ProcessorStatus>,
     },

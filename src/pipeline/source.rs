@@ -136,10 +136,7 @@ impl Actor for PipelineSourceActor {
                     FrameDirection::Downstream => {
                         // Push frame to next processor
                         if let Some(ref next) = state.next {
-                            let _ = next.cast(ProcessorMsg::ProcessFrame {
-                                frame,
-                                direction,
-                            });
+                            let _ = next.cast(ProcessorMsg::ProcessFrame { frame, direction });
                         } else {
                             println!(
                                 "[{}] No next actor to push frame to",

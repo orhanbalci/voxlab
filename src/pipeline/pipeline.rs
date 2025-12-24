@@ -5,7 +5,7 @@ use tracing::debug;
 
 use crate::pipeline::sink::{PipelineSink, PipelineSinkActor, PipelineSinkState};
 use crate::pipeline::source::{PipelineSource, PipelineSourceActor, PipelineSourceState};
-use crate::processor::{PipelineActorRef, ProcessorActor};
+use crate::processor::{PipelineActorRef, ProcessorActor, ProcessorSetup};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -110,12 +110,16 @@ impl Pipeline {
 
     /// Link the source to the first processor (if both exist)
     pub fn link_source_to_first_processor(&self) -> Result<(), PipelineError> {
-        if let (Some(source), Some(first_processor)) = (self.source.as_ref(), self.processors.first()) {
+        if let (Some(source), Some(first_processor)) =
+            (self.source.as_ref(), self.processors.first())
+        {
             source
                 .cast(crate::processor::ProcessorMsg::LinkNext {
                     next: PipelineActorRef::new(first_processor.clone()),
                 })
-                .map_err(|e| PipelineError::Other(format!("Failed to link source to first processor: {}", e)))?;
+                .map_err(|e| {
+                    PipelineError::Other(format!("Failed to link source to first processor: {}", e))
+                })?;
             debug!("Source linked to first processor");
         }
         Ok(())
@@ -124,11 +128,12 @@ impl Pipeline {
     /// Link the last processor to the sink (if both exist)
     pub fn link_last_processor_to_sink(&self) -> Result<(), PipelineError> {
         if let (Some(last_processor), Some(sink)) = (self.processors.last(), self.sink.as_ref()) {
-            sink
-                .cast(crate::processor::ProcessorMsg::LinkPrevious {
-                    previous: PipelineActorRef::new(last_processor.clone()),
-                })
-                .map_err(|e| PipelineError::Other(format!("Failed to link last processor to sink: {}", e)))?;
+            sink.cast(crate::processor::ProcessorMsg::LinkPrevious {
+                previous: PipelineActorRef::new(last_processor.clone()),
+            })
+            .map_err(|e| {
+                PipelineError::Other(format!("Failed to link last processor to sink: {}", e))
+            })?;
             debug!("Last processor linked to sink");
         }
         Ok(())
@@ -140,6 +145,38 @@ impl Pipeline {
         self.link_processors()?;
         self.link_source_to_first_processor()?;
         self.link_last_processor_to_sink()?;
+        Ok(())
+    }
+
+    /// Set up all processors in the pipeline
+    /// Similar to pipecat's _setup_processors method
+    pub fn setup_processors(&self, setup: ProcessorSetup) -> Result<(), PipelineError> {
+        debug!("Setting up {} processors", self.processors.len());
+
+        for processor in &self.processors {
+            processor
+                .cast(crate::processor::ProcessorMsg::Setup {
+                    setup: setup.clone(),
+                })
+                .map_err(|e| PipelineError::Other(format!("Failed to setup processor: {}", e)))?;
+        }
+
+        debug!("All processors set up successfully");
+        Ok(())
+    }
+
+    /// Clean up all processors in the pipeline
+    /// Similar to pipecat's _cleanup_processors method
+    pub fn cleanup_processors(&self) -> Result<(), PipelineError> {
+        debug!("Cleaning up {} processors", self.processors.len());
+
+        for processor in &self.processors {
+            processor
+                .cast(crate::processor::ProcessorMsg::Cleanup)
+                .map_err(|e| PipelineError::Other(format!("Failed to cleanup processor: {}", e)))?;
+        }
+
+        debug!("All processors cleaned up successfully");
         Ok(())
     }
 }
