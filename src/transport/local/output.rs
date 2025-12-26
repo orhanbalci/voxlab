@@ -4,6 +4,7 @@
 //! OutputTransportActor from the base transport module.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -11,9 +12,11 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use tracing::{debug, error};
 
-use crate::transport::media_sender::AudioWriter;
-use crate::transport::output::{OutputTransportActor, OutputTransportBackend, OutputTransportState, BaseOutputTransport};
 use crate::transport::local::{LocalAudioError, LocalAudioTransportParams};
+use crate::transport::media_sender::AudioWriter;
+use crate::transport::output::{
+    BaseOutputTransport, OutputTransportActor, OutputTransportBackend, OutputTransportState,
+};
 use crate::transport::TransportParams;
 
 // ============================================================================
@@ -23,7 +26,7 @@ use crate::transport::TransportParams;
 /// Message to control the audio stream thread
 enum StreamCommand {
     Start {
-        sample_rate: u32,
+        input_sample_rate: u32,
         channels: u32,
         buffer: Arc<Mutex<VecDeque<u8>>>,
     },
@@ -65,30 +68,86 @@ fn run_output_stream(
     loop {
         match cmd_rx.recv() {
             Ok(StreamCommand::Start {
-                sample_rate,
-                channels,
+                input_sample_rate,
+                channels: _input_channels,
                 buffer,
             }) => {
-                // Stop existing stream
                 _current_stream = None;
 
-                let config = StreamConfig {
-                    channels: channels as u16,
-                    sample_rate: cpal::SampleRate(sample_rate),
-                    buffer_size: cpal::BufferSize::Default,
+                // Get device's default/supported config
+                let default_config = match device.default_output_config() {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        error!("Failed to get default output config: {}", e);
+                        continue;
+                    }
                 };
+
+                let device_sample_rate = default_config.sample_rate().0;
+                let device_channels = default_config.channels();
+
+                debug!(
+                    "Device supports: {} Hz, {} channels. Input audio: {} Hz",
+                    device_sample_rate, device_channels, input_sample_rate
+                );
+
+                // Use device's native config for maximum compatibility
+                let config: StreamConfig = default_config.into();
+
+                // Calculate resampling ratio if needed
+                let resample_ratio = device_sample_rate as f64 / input_sample_rate as f64;
+                let needs_resample = (resample_ratio - 1.0).abs() > 0.01;
+
+                if needs_resample {
+                    debug!(
+                        "Will resample {}x (input {} Hz -> device {} Hz)",
+                        resample_ratio, input_sample_rate, device_sample_rate
+                    );
+                }
 
                 match device.build_output_stream(
                     &config,
-                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         let mut buf = buffer.lock().unwrap();
-                        for sample in data.iter_mut() {
-                            if buf.len() >= 2 {
+                        let out_channels = device_channels as usize;
+                        let mut output_idx = 0;
+
+                        while output_idx < data.len() {
+                            // Calculate output sample position
+                            let _output_sample_num = output_idx / out_channels;
+
+                            // Read samples from buffer as needed
+                            let sample: f32 = if buf.len() >= 2 {
                                 let lo = buf.pop_front().unwrap();
                                 let hi = buf.pop_front().unwrap();
-                                *sample = i16::from_le_bytes([lo, hi]);
+                                let sample_i16 = i16::from_le_bytes([lo, hi]);
+                                sample_i16 as f32 / 32768.0
                             } else {
-                                *sample = 0; // Silence if buffer empty
+                                0.0
+                            };
+
+                            // Write to all output channels (mono -> stereo/multi)
+                            for ch in 0..out_channels {
+                                if output_idx + ch < data.len() {
+                                    data[output_idx + ch] = sample;
+                                }
+                            }
+                            output_idx += out_channels;
+
+                            // For upsampling, repeat the sample
+                            if needs_resample && resample_ratio > 1.0 {
+                                let repeats = (resample_ratio.ceil() as usize).saturating_sub(1);
+                                for _ in 0..repeats {
+                                    for ch in 0..out_channels {
+                                        if output_idx + ch < data.len() {
+                                            data[output_idx + ch] = sample;
+                                        }
+                                    }
+                                    output_idx += out_channels;
+                                    if output_idx >= data.len() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     },
@@ -99,7 +158,10 @@ fn run_output_stream(
                         if let Err(e) = stream.play() {
                             error!("Failed to play stream: {}", e);
                         } else {
-                            debug!("Started audio output stream");
+                            debug!(
+                                "Started audio output stream ({} Hz, {} ch)",
+                                device_sample_rate, device_channels
+                            );
                             _current_stream = Some(stream);
                         }
                     }
@@ -129,21 +191,24 @@ fn run_output_stream(
 /// Audio data is written to a shared ring buffer that the CPAL callback reads from.
 pub struct CpalOutputBackend {
     /// Device name to use (None = default device)
+    #[allow(dead_code)]
     device_name: Option<String>,
     /// Command sender to the stream thread
     stream_cmd_tx: Option<std::sync::mpsc::Sender<StreamCommand>>,
     /// Playback buffer shared with CPAL callback
     playback_buffer: Arc<Mutex<VecDeque<u8>>>,
+    /// Whether the stream has been started
+    stream_started: AtomicBool,
+    /// Sample rate for the stream
+    sample_rate: u32,
 }
 
 impl CpalOutputBackend {
-    /// Create a new CPAL output backend
-    ///
-    /// # Arguments
-    ///
-    /// * `device_name` - Optional device name (None for default output device)
     pub fn new(device_name: Option<String>) -> Self {
-        // Spawn the stream management thread
+        Self::with_sample_rate(device_name, 24000)
+    }
+
+    pub fn with_sample_rate(device_name: Option<String>, sample_rate: u32) -> Self {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
 
         let device_name_clone = device_name.clone();
@@ -155,12 +220,25 @@ impl CpalOutputBackend {
             device_name,
             stream_cmd_tx: Some(cmd_tx),
             playback_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            stream_started: AtomicBool::new(false),
+            sample_rate,
         }
     }
 
-    /// Get the device name
-    pub fn device_name(&self) -> Option<&str> {
-        self.device_name.as_deref()
+    fn ensure_stream_started(&self) {
+        if !self.stream_started.swap(true, Ordering::SeqCst) {
+            if let Some(ref cmd_tx) = self.stream_cmd_tx {
+                let _ = cmd_tx.send(StreamCommand::Start {
+                    input_sample_rate: self.sample_rate,
+                    channels: 1,
+                    buffer: self.playback_buffer.clone(),
+                });
+                debug!(
+                    "CpalOutputBackend: Auto-started stream at {} Hz",
+                    self.sample_rate
+                );
+            }
+        }
     }
 }
 
@@ -173,7 +251,7 @@ impl OutputTransportBackend for CpalOutputBackend {
         if let Some(ref cmd_tx) = self.stream_cmd_tx {
             cmd_tx
                 .send(StreamCommand::Start {
-                    sample_rate,
+                    input_sample_rate: sample_rate,
                     channels,
                     buffer: self.playback_buffer.clone(),
                 })
@@ -201,8 +279,14 @@ impl OutputTransportBackend for CpalOutputBackend {
     }
 
     fn write_audio(&self, data: &[u8]) {
+        self.ensure_stream_started();
         if let Ok(mut buf) = self.playback_buffer.lock() {
             buf.extend(data);
+            debug!(
+                "CpalOutputBackend: Wrote {} bytes, buffer size: {}",
+                data.len(),
+                buf.len()
+            );
         }
     }
 
@@ -271,14 +355,13 @@ pub type LocalAudioOutputTransportActor = OutputTransportActor<CpalOutputBackend
 pub type LocalAudioOutputTransportState = OutputTransportState<CpalOutputBackend>;
 
 impl LocalAudioOutputTransportState {
-    /// Create a new local audio output transport state
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name for the transport
-    /// * `params` - Local audio transport parameters
-    pub fn new_local(name: String, params: LocalAudioTransportParams) -> Result<Self, LocalAudioError> {
-        let backend = CpalOutputBackend::new(params.output_device_name.clone());
+    pub fn new_local(
+        name: String,
+        params: LocalAudioTransportParams,
+    ) -> Result<Self, LocalAudioError> {
+        let sample_rate = params.base.audio_out_sample_rate.unwrap_or(24000);
+        let backend =
+            CpalOutputBackend::with_sample_rate(params.output_device_name.clone(), sample_rate);
         let behavior = BaseOutputTransport::new(name, params.base);
         Ok(Self::new(behavior, backend))
     }

@@ -9,7 +9,10 @@ use cpal::StreamConfig;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
-use crate::transport::input::{AudioDataSender, InputTransportActor, InputTransportBackend, InputTransportState, BaseInputTransport};
+use crate::transport::input::{
+    AudioDataSender, BaseInputTransport, InputTransportActor, InputTransportBackend,
+    InputTransportState,
+};
 use crate::transport::local::{LocalAudioError, LocalAudioTransportParams};
 use crate::transport::TransportParams;
 
@@ -28,10 +31,7 @@ enum StreamCommand {
 }
 
 /// Starts the audio input stream in a blocking thread
-fn run_input_stream(
-    device_name: Option<String>,
-    cmd_rx: std::sync::mpsc::Receiver<StreamCommand>,
-) {
+fn run_input_stream(device_name: Option<String>, cmd_rx: std::sync::mpsc::Receiver<StreamCommand>) {
     let host = cpal::default_host();
 
     // Get input device
@@ -78,8 +78,7 @@ fn run_input_stream(
                 match device.build_input_stream(
                     &config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        let bytes: Vec<u8> =
-                            data.iter().flat_map(|&s| s.to_le_bytes()).collect();
+                        let bytes: Vec<u8> = data.iter().flat_map(|&s| s.to_le_bytes()).collect();
                         let _ = audio_tx.send(bytes);
                     },
                     |err| error!("Input stream error: {}", err),
@@ -251,7 +250,10 @@ impl LocalAudioInputTransportState {
     ///
     /// * `name` - Name for the transport
     /// * `params` - Local audio transport parameters
-    pub fn new_local(name: String, params: LocalAudioTransportParams) -> Result<Self, LocalAudioError> {
+    pub fn new_local(
+        name: String,
+        params: LocalAudioTransportParams,
+    ) -> Result<Self, LocalAudioError> {
         let backend = CpalInputBackend::new(params.input_device_name.clone());
         let behavior = BaseInputTransport::new(name, params.base);
         Ok(Self::new(behavior, backend))

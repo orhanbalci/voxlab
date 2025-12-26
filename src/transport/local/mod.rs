@@ -11,8 +11,8 @@ pub use input::{
     LocalAudioInputTransportState,
 };
 pub use output::{
-    list_output_devices, CpalOutputBackend, LocalAudioOutputTransport, LocalAudioOutputTransportActor,
-    LocalAudioOutputTransportState,
+    list_output_devices, CpalOutputBackend, LocalAudioOutputTransport,
+    LocalAudioOutputTransportActor, LocalAudioOutputTransportState,
 };
 
 use thiserror::Error;
@@ -149,6 +149,8 @@ impl BaseTransport for LocalAudioTransport {
     }
 
     fn output(&self) -> PipelineActorRef {
-        self.output.clone().expect("Output transport not initialized")
+        self.output
+            .clone()
+            .expect("Output transport not initialized")
     }
 }

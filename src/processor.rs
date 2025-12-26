@@ -2,6 +2,7 @@
 
 use crate::frame::{Frame, FrameDirection};
 use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort};
+use tracing::debug;
 
 /// A trait for any actor that can handle ProcessorMsg
 /// This allows heterogeneous actor chains
@@ -129,6 +130,17 @@ impl ProcessorState {
             cancelling: false,
         }
     }
+
+    /// Create processor state from a boxed behavior
+    pub fn new_boxed(behavior: Box<dyn ProcessorBehavior>) -> Self {
+        Self {
+            behavior,
+            next: None,
+            frames_processed: 0,
+            is_running: false,
+            cancelling: false,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -142,7 +154,7 @@ impl Actor for ProcessorActor {
         _myself: ActorRef<Self>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("[{}] Actor started", args.behavior.name());
+        debug!("[{}] Actor started", args.behavior.name());
         Ok(args)
     }
 
@@ -151,7 +163,7 @@ impl Actor for ProcessorActor {
         _myself: ActorRef<Self>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        println!("[{}] Actor stopped", state.behavior.name());
+        debug!("[{}] Actor stopped", state.behavior.name());
         Ok(())
     }
 
@@ -163,8 +175,17 @@ impl Actor for ProcessorActor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProcessorMsg::ProcessFrame { frame, direction } => {
-                println!("[{}] Processing frame", state.behavior.name());
-                // Handle system frames
+                // Upstream system frames should not be processed or forwarded by regular processors
+                if direction == FrameDirection::Upstream {
+                    return Ok(());
+                }
+
+                debug!(
+                    "[{}] Processing {} (id: {})",
+                    state.behavior.name(),
+                    frame.name(),
+                    frame.id()
+                );
                 match &frame {
                     Frame::Start {
                         audio_in_sample_rate,
@@ -196,19 +217,16 @@ impl Actor for ProcessorActor {
                 }
             }
             ProcessorMsg::LinkNext { next } => {
-                println!("[{}] Linked to next processor", state.behavior.name());
+                debug!("[{}] Linked to next processor", state.behavior.name());
                 state.next = Some(next);
             }
-            ProcessorMsg::LinkPrevious { previous: _ } => {
-                // Standard processors don't use previous links, only sinks do
-                // This is a no-op for regular processors
-            }
+            ProcessorMsg::LinkPrevious { .. } => {}
             ProcessorMsg::Setup { setup } => {
-                println!("[{}] Setting up processor", state.behavior.name());
+                debug!("[{}] Setting up processor", state.behavior.name());
                 state.behavior.setup(&setup).await;
             }
             ProcessorMsg::Cleanup => {
-                println!("[{}] Cleaning up processor", state.behavior.name());
+                debug!("[{}] Cleaning up processor", state.behavior.name());
                 state.behavior.cleanup().await;
             }
             ProcessorMsg::GetStatus { reply } => {

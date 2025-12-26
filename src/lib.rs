@@ -6,5 +6,6 @@
 pub mod frame;
 pub mod pipeline;
 pub mod processor;
+pub mod services;
 pub mod task;
 pub mod transport;

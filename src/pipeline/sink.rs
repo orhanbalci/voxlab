@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use tracing::debug;
 
 use crate::{
     frame::{Frame, FrameDirection},
@@ -77,7 +78,7 @@ impl Actor for PipelineSinkActor {
         _myself: ActorRef<Self>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("[{}] Sink Actor started", args.behaviour.name());
+        debug!("[{}] Sink actor started", args.behaviour.name());
         Ok(args)
     }
 
@@ -86,7 +87,7 @@ impl Actor for PipelineSinkActor {
         _myself: ActorRef<Self>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        println!("[{}] Sink Actor stopped", state.behaviour.name());
+        debug!("[{}] Sink actor stopped", state.behaviour.name());
         Ok(())
     }
 
@@ -98,26 +99,21 @@ impl Actor for PipelineSinkActor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProcessorMsg::ProcessFrame { frame, direction } => {
-                let frame_name = frame.name();
-                let frame_id = frame.id();
-                println!(
-                    "[{}] Sink processing {} (id: {})",
+                debug!(
+                    "[{}] Processing {} (id: {})",
                     state.behaviour.name(),
-                    frame_name,
-                    frame_id
+                    frame.name(),
+                    frame.id()
                 );
 
-                // Handle system frames
                 match &frame {
                     Frame::Start { .. } => {
                         state.is_running = true;
                         state.cancelling = false;
-                        // Optionally call on_start if needed
                     }
                     Frame::End { .. } => {
                         state.is_running = false;
                         state.cancelling = false;
-                        // Optionally call on_stop if needed
                     }
                     Frame::Cancel { .. } => {
                         state.cancelling = true;
@@ -131,12 +127,11 @@ impl Actor for PipelineSinkActor {
                         state.behaviour.process(frame).await;
                     }
                     FrameDirection::Upstream => {
-                        // Pull frame from previous processor
                         if let Some(ref prev) = state.previous {
                             let _ = prev.cast(ProcessorMsg::ProcessFrame { frame, direction });
                         } else {
-                            println!(
-                                "[{}] No previous actor to pull frame from",
+                            debug!(
+                                "[{}] No previous actor to push frame to",
                                 state.behaviour.name()
                             );
                         }
@@ -144,18 +139,17 @@ impl Actor for PipelineSinkActor {
                 }
             }
             ProcessorMsg::LinkPrevious { previous } => {
-                println!("[{}] Linking to previous processor", state.behaviour.name());
+                debug!("[{}] Linking to previous processor", state.behaviour.name());
                 state.previous = Some(previous);
             }
             ProcessorMsg::Setup { setup } => {
-                println!("[{}] Setting up sink", state.behaviour.name());
+                debug!("[{}] Setting up sink", state.behaviour.name());
                 state.behaviour.setup(&setup).await;
             }
             ProcessorMsg::Cleanup => {
-                println!("[{}] Cleaning up sink", state.behaviour.name());
+                debug!("[{}] Cleaning up sink", state.behaviour.name());
                 state.behaviour.cleanup().await;
             }
-            // Ignore other processor messages that don't apply to sink
             _ => {}
         }
 

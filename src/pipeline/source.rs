@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use tracing::debug;
 
 use crate::{
     frame::{Frame, FrameDirection},
@@ -77,7 +78,7 @@ impl Actor for PipelineSourceActor {
         _myself: ActorRef<Self>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        println!("[{}] Source Actor started", args.behaviour.name());
+        debug!("[{}] Source actor started", args.behaviour.name());
         Ok(args)
     }
 
@@ -86,7 +87,7 @@ impl Actor for PipelineSourceActor {
         _myself: ActorRef<Self>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        println!("[{}] Source Actor stopped", state.behaviour.name());
+        debug!("[{}] Source actor stopped", state.behaviour.name());
         Ok(())
     }
 
@@ -98,16 +99,13 @@ impl Actor for PipelineSourceActor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             ProcessorMsg::ProcessFrame { frame, direction } => {
-                let frame_name = frame.name();
-                let frame_id = frame.id();
-                println!(
+                debug!(
                     "[{}] Processing {} (id: {})",
                     state.behaviour.name(),
-                    frame_name,
-                    frame_id
+                    frame.name(),
+                    frame.id()
                 );
 
-                // Handle system frames
                 match &frame {
                     Frame::Start {
                         audio_in_sample_rate,
@@ -134,11 +132,10 @@ impl Actor for PipelineSourceActor {
                         state.behaviour.process(frame).await;
                     }
                     FrameDirection::Downstream => {
-                        // Push frame to next processor
                         if let Some(ref next) = state.next {
                             let _ = next.cast(ProcessorMsg::ProcessFrame { frame, direction });
                         } else {
-                            println!(
+                            debug!(
                                 "[{}] No next actor to push frame to",
                                 state.behaviour.name()
                             );
@@ -147,18 +144,17 @@ impl Actor for PipelineSourceActor {
                 }
             }
             ProcessorMsg::LinkNext { next } => {
-                println!("[{}] Linking to next processor", state.behaviour.name());
+                debug!("[{}] Linking to next processor", state.behaviour.name());
                 state.next = Some(next);
             }
             ProcessorMsg::Setup { setup } => {
-                println!("[{}] Setting up source", state.behaviour.name());
+                debug!("[{}] Setting up source", state.behaviour.name());
                 state.behaviour.setup(&setup).await;
             }
             ProcessorMsg::Cleanup => {
-                println!("[{}] Cleaning up source", state.behaviour.name());
+                debug!("[{}] Cleaning up source", state.behaviour.name());
                 state.behaviour.cleanup().await;
             }
-            // Ignore other processor messages that don't apply to source
             _ => {}
         }
 
