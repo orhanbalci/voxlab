@@ -54,7 +54,7 @@ impl PipelineRunner {
         .await?;
         debug!("PipelineRunner: Spawned local audio output transport");
 
-        let pipeline =
+        let (pipeline, completion_rx) =
             Pipeline::new("main-pipeline".to_string(), processor_actors, None, None).await?;
 
         let output_ref = PipelineActorRef::new(output_actor);
@@ -91,6 +91,9 @@ impl PipelineRunner {
 
         debug!("PipelineRunner: Pipeline ready");
 
-        Ok(PipelineTask::from_source_actor(pipeline.source().clone()))
+        Ok(PipelineTask::new(
+            PipelineActorRef::new(pipeline.source().clone()),
+            completion_rx,
+        ))
     }
 }

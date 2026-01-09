@@ -25,3 +25,7 @@ tracing-subscriber = "0.3"
 [[example]]
 name = "01a-local-audio"
 path = "examples/01a-local-audio.rs"
+
+[[example]]
+name = "02-llm-say-one-thing"
+path = "examples/02-llm-say-one-thing.rs"

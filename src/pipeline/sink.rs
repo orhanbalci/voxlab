@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use tokio::sync::oneshot;
 use tracing::debug;
 
 use crate::{
@@ -49,6 +50,8 @@ pub struct PipelineSinkState {
     previous: Option<PipelineActorRef>,
     is_running: bool,
     cancelling: bool,
+    /// Channel to signal pipeline completion (when End frame is received)
+    completion_tx: Option<oneshot::Sender<()>>,
 }
 
 impl PipelineSinkState {
@@ -58,11 +61,17 @@ impl PipelineSinkState {
             previous: None,
             is_running: false,
             cancelling: false,
+            completion_tx: None,
         }
     }
 
     pub fn with_previous(mut self, previous: PipelineActorRef) -> Self {
         self.previous = Some(previous);
+        self
+    }
+
+    pub fn with_completion_tx(mut self, tx: oneshot::Sender<()>) -> Self {
+        self.completion_tx = Some(tx);
         self
     }
 }
@@ -114,6 +123,11 @@ impl Actor for PipelineSinkActor {
                     Frame::End { .. } => {
                         state.is_running = false;
                         state.cancelling = false;
+                        // Signal pipeline completion
+                        if let Some(tx) = state.completion_tx.take() {
+                            let _ = tx.send(());
+                            debug!("[{}] Signaled pipeline completion", state.behaviour.name());
+                        }
                     }
                     Frame::Cancel { .. } => {
                         state.cancelling = true;

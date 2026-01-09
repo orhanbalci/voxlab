@@ -1,11 +1,15 @@
 // Frame Pipeline Implementation using Ractor Actors
 
 use ractor::{Actor, ActorRef, SpawnErr};
+use tokio::sync::oneshot;
 use tracing::debug;
 
 use crate::pipeline::sink::{PipelineSink, PipelineSinkActor, PipelineSinkState};
 use crate::pipeline::source::{PipelineSource, PipelineSourceActor, PipelineSourceState};
 use crate::processor::{PipelineActorRef, ProcessorActor, ProcessorSetup};
+
+/// Receiver for pipeline completion signal
+pub type CompletionReceiver = oneshot::Receiver<()>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
@@ -32,8 +36,11 @@ impl Pipeline {
         processors: Vec<ActorRef<ProcessorActor>>,
         source: Option<ActorRef<PipelineSourceActor>>,
         sink: Option<ActorRef<PipelineSinkActor>>,
-    ) -> Result<Self, PipelineError> {
+    ) -> Result<(Self, CompletionReceiver), PipelineError> {
         let pipeline_name = name.clone();
+
+        // Create completion channel
+        let (completion_tx, completion_rx) = oneshot::channel();
 
         // Create default source if not provided
         let source_ref = if let Some(s) = source {
@@ -50,7 +57,7 @@ impl Pipeline {
             actor_ref
         };
 
-        // Create default sink if not provided
+        // Create default sink if not provided (with completion channel)
         let sink_ref = if let Some(s) = sink {
             s
         } else {
@@ -60,7 +67,7 @@ impl Pipeline {
                     debug!("Sink received downstream frame: {:?}", frame);
                 },
             );
-            let state = PipelineSinkState::new(sink_logic);
+            let state = PipelineSinkState::new(sink_logic).with_completion_tx(completion_tx);
             let (actor_ref, _) = Actor::spawn(None, PipelineSinkActor, state).await?;
             actor_ref
         };
@@ -74,12 +81,15 @@ impl Pipeline {
         }
         all_processors.push(PipelineActorRef::new(sink_ref.clone()));
 
-        Ok(Self {
-            name: pipeline_name,
-            processors: all_processors,
-            source: source_ref,
-            sink: sink_ref,
-        })
+        Ok((
+            Self {
+                name: pipeline_name,
+                processors: all_processors,
+                source: source_ref,
+                sink: sink_ref,
+            },
+            completion_rx,
+        ))
     }
 
     pub fn name(&self) -> &str {

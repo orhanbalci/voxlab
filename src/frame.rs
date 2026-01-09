@@ -38,6 +38,21 @@ pub struct ImageRawFrame {
     pub format: Option<String>,
 }
 
+/// Role in an LLM conversation
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LLMRole {
+    System,
+    User,
+    Assistant,
+}
+
+/// A single message in an LLM conversation
+#[derive(Debug, Clone)]
+pub struct LLMMessage {
+    pub role: LLMRole,
+    pub content: String,
+}
+
 /// Simplified Frame enum for the pipeline
 #[derive(Debug, Clone)]
 pub enum Frame {
@@ -180,6 +195,10 @@ pub enum Frame {
     LLMFullResponseEnd {
         header: FrameHeader,
     },
+    LLMMessages {
+        header: FrameHeader,
+        messages: Vec<LLMMessage>,
+    },
 }
 
 impl Frame {
@@ -218,6 +237,7 @@ impl Frame {
             Frame::InputImageRaw { header, .. } => header.id,
             Frame::LLMFullResponseStart { header } => header.id,
             Frame::LLMFullResponseEnd { header } => header.id,
+            Frame::LLMMessages { header, .. } => header.id,
         }
     }
 
@@ -256,6 +276,7 @@ impl Frame {
             Frame::InputImageRaw { .. } => "InputImageRawFrame",
             Frame::LLMFullResponseStart { .. } => "LLMFullResponseStartFrame",
             Frame::LLMFullResponseEnd { .. } => "LLMFullResponseEndFrame",
+            Frame::LLMMessages { .. } => "LLMMessagesFrame",
         }
     }
 
@@ -307,6 +328,7 @@ impl Frame {
                 | Frame::Sprite { .. }
                 | Frame::InputAudioRaw { .. }
                 | Frame::InputImageRaw { .. }
+                | Frame::LLMMessages { .. }
         )
     }
 
