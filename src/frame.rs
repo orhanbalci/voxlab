@@ -199,6 +199,34 @@ pub enum Frame {
         header: FrameHeader,
         messages: Vec<LLMMessage>,
     },
+    /// Final transcription result from STT service
+    Transcription {
+        header: FrameHeader,
+        /// The transcribed text
+        text: String,
+        /// User identifier (for multi-user scenarios)
+        user_id: Option<String>,
+        /// Detected or specified language code (e.g., "en", "es")
+        language: Option<String>,
+        /// Confidence score from the STT service (0.0 to 1.0)
+        confidence: Option<f32>,
+    },
+    /// Partial/interim transcription result (streaming STT)
+    InterimTranscription {
+        header: FrameHeader,
+        /// The partial transcribed text (may change)
+        text: String,
+        /// User identifier (for multi-user scenarios)
+        user_id: Option<String>,
+        /// Detected or specified language code
+        language: Option<String>,
+    },
+    /// Control frame to mute/unmute STT processing
+    STTMute {
+        header: FrameHeader,
+        /// True to mute (stop transcribing), false to unmute
+        mute: bool,
+    },
 }
 
 impl Frame {
@@ -238,6 +266,9 @@ impl Frame {
             Frame::LLMFullResponseStart { header } => header.id,
             Frame::LLMFullResponseEnd { header } => header.id,
             Frame::LLMMessages { header, .. } => header.id,
+            Frame::Transcription { header, .. } => header.id,
+            Frame::InterimTranscription { header, .. } => header.id,
+            Frame::STTMute { header, .. } => header.id,
         }
     }
 
@@ -277,6 +308,9 @@ impl Frame {
             Frame::LLMFullResponseStart { .. } => "LLMFullResponseStartFrame",
             Frame::LLMFullResponseEnd { .. } => "LLMFullResponseEndFrame",
             Frame::LLMMessages { .. } => "LLMMessagesFrame",
+            Frame::Transcription { .. } => "TranscriptionFrame",
+            Frame::InterimTranscription { .. } => "InterimTranscriptionFrame",
+            Frame::STTMute { .. } => "STTMuteFrame",
         }
     }
 
@@ -313,6 +347,7 @@ impl Frame {
                 | Frame::Stop { .. }
                 | Frame::LLMFullResponseStart { .. }
                 | Frame::LLMFullResponseEnd { .. }
+                | Frame::STTMute { .. }
         )
     }
 
@@ -329,6 +364,8 @@ impl Frame {
                 | Frame::InputAudioRaw { .. }
                 | Frame::InputImageRaw { .. }
                 | Frame::LLMMessages { .. }
+                | Frame::Transcription { .. }
+                | Frame::InterimTranscription { .. }
         )
     }
 

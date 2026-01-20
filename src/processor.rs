@@ -6,8 +6,12 @@ use tracing::debug;
 
 /// A trait for any actor that can handle ProcessorMsg
 /// This allows heterogeneous actor chains
+#[async_trait::async_trait]
 pub trait ProcessorMessageHandler: Send + Sync {
     fn cast_processor_msg(&self, msg: ProcessorMsg) -> Result<(), MessagingErr>;
+
+    /// Synchronously link to the next processor and wait for confirmation
+    async fn link_next_sync(&self, next: PipelineActorRef) -> Result<(), MessagingErr>;
 }
 
 /// Wrapper for any actor reference that can handle ProcessorMsg
@@ -19,15 +23,23 @@ pub struct PipelineActorRef {
 impl PipelineActorRef {
     pub fn new<A>(actor_ref: ActorRef<A>) -> Self
     where
-        A: Actor<Msg = ProcessorMsg>,
+        A: Actor<Msg = ProcessorMsg> + 'static,
     {
         struct Handler<A: Actor<Msg = ProcessorMsg>> {
             actor_ref: ActorRef<A>,
         }
 
-        impl<A: Actor<Msg = ProcessorMsg>> ProcessorMessageHandler for Handler<A> {
+        #[async_trait::async_trait]
+        impl<A: Actor<Msg = ProcessorMsg> + 'static> ProcessorMessageHandler for Handler<A> {
             fn cast_processor_msg(&self, msg: ProcessorMsg) -> Result<(), MessagingErr> {
                 self.actor_ref.cast(msg)
+            }
+
+            async fn link_next_sync(&self, next: PipelineActorRef) -> Result<(), MessagingErr> {
+                use ractor::rpc::call;
+                call::<A, (), _>(&self.actor_ref, |reply| ProcessorMsg::LinkNextSync { next, reply }, None)
+                    .await?;
+                Ok(())
             }
         }
 
@@ -38,6 +50,11 @@ impl PipelineActorRef {
 
     pub fn cast(&self, msg: ProcessorMsg) -> Result<(), MessagingErr> {
         self.handler.cast_processor_msg(msg)
+    }
+
+    /// Synchronously link to the next processor and wait for confirmation
+    pub async fn link_next_sync(&self, next: PipelineActorRef) -> Result<(), MessagingErr> {
+        self.handler.link_next_sync(next).await
     }
 }
 
@@ -131,7 +148,6 @@ impl ProcessorState {
         }
     }
 
-    /// Create processor state from a boxed behavior
     pub fn new_boxed(behavior: Box<dyn ProcessorBehavior>) -> Self {
         Self {
             behavior,
@@ -220,6 +236,11 @@ impl Actor for ProcessorActor {
                 debug!("[{}] Linked to next processor", state.behavior.name());
                 state.next = Some(next);
             }
+            ProcessorMsg::LinkNextSync { next, reply } => {
+                debug!("[{}] Linked to next processor (sync)", state.behavior.name());
+                state.next = Some(next);
+                let _ = reply.send(());
+            }
             ProcessorMsg::LinkPrevious { .. } => {}
             ProcessorMsg::Setup { setup } => {
                 debug!("[{}] Setting up processor", state.behavior.name());
@@ -251,6 +272,10 @@ pub enum ProcessorMsg {
     LinkNext {
         next: PipelineActorRef,
     },
+    LinkNextSync {
+        next: PipelineActorRef,
+        reply: RpcReplyPort<()>,
+    },
     LinkPrevious {
         previous: PipelineActorRef,
     },
@@ -262,5 +287,3 @@ pub enum ProcessorMsg {
         reply: RpcReplyPort<ProcessorStatus>,
     },
 }
-
-// Message trait is automatically implemented via blanket impl for types that are Send + 'static

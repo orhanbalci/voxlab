@@ -3,6 +3,7 @@
 //! This library provides frame types, processor traits, and pipeline utilities
 //! for building actor-based processing pipelines using the Ractor framework.
 
+pub mod audio;
 pub mod frame;
 pub mod pipeline;
 pub mod processor;

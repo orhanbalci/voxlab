@@ -5,6 +5,8 @@
 
 pub mod deepgram;
 pub mod openai;
+pub mod stt;
 
 pub use deepgram::DeepgramTTSService;
 pub use openai::{LLMService, OpenAILLMService};
+pub use stt::{AudioBuffer, STTService, SegmentedSTTService, TranscriptionResult};

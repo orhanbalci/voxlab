@@ -147,6 +147,11 @@ impl Actor for PipelineSourceActor {
                 debug!("[{}] Linking to next processor", state.behaviour.name());
                 state.next = Some(next);
             }
+            ProcessorMsg::LinkNextSync { next, reply } => {
+                debug!("[{}] Linking to next processor (sync)", state.behaviour.name());
+                state.next = Some(next);
+                let _ = reply.send(());
+            }
             ProcessorMsg::Setup { setup } => {
                 debug!("[{}] Setting up source", state.behaviour.name());
                 state.behaviour.setup(&setup).await;

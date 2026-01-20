@@ -589,6 +589,12 @@ impl<B: OutputTransportBackend + AudioWriter> Actor for OutputTransportActor<B> 
                 // Output transport doesn't use next links (it's the end of pipeline)
             }
 
+            ProcessorMsg::LinkNextSync { reply, .. } => {
+                // Output transport doesn't use next links (it's the end of pipeline)
+                // But still acknowledge the request
+                let _ = reply.send(());
+            }
+
             ProcessorMsg::LinkPrevious { previous } => {
                 debug!("[{}] Linked to previous processor", state.behavior.name);
                 state.previous = Some(previous);

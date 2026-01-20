@@ -156,6 +156,10 @@ impl Actor for PipelineSinkActor {
                 debug!("[{}] Linking to previous processor", state.behaviour.name());
                 state.previous = Some(previous);
             }
+            ProcessorMsg::LinkNextSync { reply, .. } => {
+                // Sink doesn't use next links, but acknowledge the request
+                let _ = reply.send(());
+            }
             ProcessorMsg::Setup { setup } => {
                 debug!("[{}] Setting up sink", state.behaviour.name());
                 state.behaviour.setup(&setup).await;

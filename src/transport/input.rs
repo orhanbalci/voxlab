@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::frame::{Frame, FrameDirection, FrameHeader};
 use crate::processor::{
@@ -22,8 +22,19 @@ use crate::transport::TransportParams;
 // InputTransportBackend trait - implemented by concrete transports
 // ============================================================================
 
+/// Audio data with metadata
+#[derive(Debug, Clone)]
+pub struct AudioData {
+    /// Raw PCM audio bytes
+    pub data: Vec<u8>,
+    /// Actual sample rate from the device
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u32,
+}
+
 /// Sender type for audio data from backend to actor
-pub type AudioDataSender = mpsc::UnboundedSender<Vec<u8>>;
+pub type AudioDataSender = mpsc::UnboundedSender<AudioData>;
 
 /// Backend trait for input transport implementations
 ///
@@ -326,14 +337,18 @@ impl<B: InputTransportBackend> InputTransportState<B> {
 
     /// Start audio input streaming via backend
     async fn start_audio_streaming(&mut self) {
-        debug!(
-            "[{}] Starting audio streaming via {}",
+        info!(
+            "[{}] Starting audio streaming via {} (sample_rate={}, channels={}, passthrough={}, enabled={})",
             self.behavior.name,
-            self.backend.name()
+            self.backend.name(),
+            self.sample_rate,
+            self.num_channels,
+            self.behavior.params.audio_in_passthrough,
+            self.behavior.params.audio_in_enabled
         );
 
         // Create channel for audio data from backend
-        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<AudioData>();
 
         // Start backend capture
         if let Err(e) = self
@@ -350,33 +365,59 @@ impl<B: InputTransportBackend> InputTransportState<B> {
             return;
         }
 
+        info!("[{}] Backend capture started successfully", self.behavior.name);
+
         // Spawn task to receive audio and push downstream
         let next = self.next.clone();
-        let sample_rate = self.sample_rate;
-        let channels = self.num_channels;
         let passthrough = self.behavior.params.audio_in_passthrough;
         let enabled = self.behavior.params.audio_in_enabled;
+        let name = self.behavior.name.clone();
+
+        let has_next = next.is_some();
+        info!("[{}] Audio task spawning, has_next={}", name, has_next);
 
         let task = tokio::spawn(async move {
-            while let Some(audio) = audio_rx.recv().await {
+            let mut frame_count = 0u64;
+            info!(
+                "[{}] Audio task started: enabled={}, passthrough={}, has_next={}",
+                name, enabled, passthrough, next.is_some()
+            );
+            while let Some(audio_data) = audio_rx.recv().await {
+                frame_count += 1;
+                if frame_count == 1 {
+                    info!("[{}] First audio chunk received ({} bytes, {}Hz)", 
+                          name, audio_data.data.len(), audio_data.sample_rate);
+                }
+                if frame_count % 100 == 0 {
+                    info!("[{}] Audio chunks received: {}", name, frame_count);
+                }
                 if !enabled {
+                    debug!("[{}] Skipping audio chunk (not enabled)", name);
                     continue;
                 }
                 if let Some(ref next) = next {
                     let frame = Frame::InputAudioRaw {
                         header: FrameHeader::default(),
-                        audio,
-                        sample_rate,
-                        num_channels: channels,
+                        audio: audio_data.data,
+                        sample_rate: audio_data.sample_rate,
+                        num_channels: audio_data.channels,
                     };
                     if passthrough {
+                        if frame_count == 1 {
+                            info!("[{}] Sending first audio frame downstream", name);
+                        }
                         let _ = next.cast(ProcessorMsg::ProcessFrame {
                             frame,
                             direction: FrameDirection::Downstream,
                         });
+                    } else {
+                        debug!("[{}] Skipping audio chunk (passthrough disabled)", name);
                     }
+                } else {
+                    warn!("[{}] No next processor to send audio to!", name);
                 }
             }
+            info!("[{}] Audio task ended after {} chunks", name, frame_count);
         });
 
         self.audio_task = Some(task);
@@ -495,10 +536,18 @@ impl<B: InputTransportBackend> Actor for InputTransportActor<B> {
             ProcessorMsg::ProcessFrame { frame, direction } => {
                 state.frames_processed += 1;
 
+                info!(
+                    "[{}] Received frame: {} (direction: {:?})",
+                    state.behavior.name,
+                    frame.name(),
+                    direction
+                );
+
                 // This mirrors Pipecat's process_frame method
                 match &frame {
                     // StartFrame: push first, then start
                     Frame::Start { .. } => {
+                        info!("[{}] Processing StartFrame", state.behavior.name);
                         state.push_frame(frame.clone(), direction);
                         state.start(&frame).await;
                     }
@@ -557,6 +606,12 @@ impl<B: InputTransportBackend> Actor for InputTransportActor<B> {
             ProcessorMsg::LinkNext { next } => {
                 debug!("[{}] Linked to next processor", state.behavior.name);
                 state.next = Some(next);
+            }
+
+            ProcessorMsg::LinkNextSync { next, reply } => {
+                debug!("[{}] Linked to next processor (sync)", state.behavior.name);
+                state.next = Some(next);
+                let _ = reply.send(());
             }
 
             ProcessorMsg::LinkPrevious { .. } => {
